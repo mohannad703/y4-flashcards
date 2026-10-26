@@ -1326,15 +1326,16 @@ window.HN = (function () {
     S.shuffleO = $('#shuffleO').checked;
     S.free = $('#freeNav').checked;
     S.repeatsWas = S.repeats || 1;
-    if (S.mode === 'exam' || S.layout === 'scroll') S.repeats = 0;
+    if (S.mode === 'exam') S.repeats = 0;
     H.store.set('setup', { timing: S.mode, layout: S.layout, rep: String(parseInt(H.radio('rep', '1'), 10)), shuffleQ: S.shuffleQ, shuffleO: S.shuffleO, free: S.free });
   }
   function syncSetup() {
-    var off = H.radio('timing', 'learn') === 'exam' || H.radio('layout', 'card') === 'scroll';
+    var off = H.radio('timing', 'learn') === 'exam';
     $$('input[name=rep]').forEach(function (r) { r.disabled = off; });
     $('#repHint').textContent = off
-      ? 'Repeating misses works in Learn mode with the Card layout.'
-      : 'Missed questions come back later in the session so they stick.';
+      ? 'With "At the end", answers show only when you finish, so missed questions come back through "Practise missed" on the results page.'
+      : 'A missed question comes back later; miss it again and it keeps coming back until you get it right.';
+    $('#repHint').hidden = false;
   }
   function loadSetup() {
     var s = H.store.get('setup', null);
@@ -1390,7 +1391,7 @@ window.HN = (function () {
         '<span class="opt-text">' + esc(o) + '</span><span class="opt-mark"></span></button>';
     }).join('');
     card.innerHTML =
-      '<div class="q-head"><p class="q-pos">' + (inList ? 'Question ' + (i + 1) : posLabel(i)) + '</p>' +
+      '<div class="q-head"><p class="q-pos">' + (inList ? (it.repeat ? 'Again: a question you missed' : 'Question ' + (i + 1)) : posLabel(i)) + '</p>' +
       '<div class="q-meta">' + H.metaLine(it) + '</div></div>' +
       '<h2 class="q-text" tabindex="-1">' + questionHtml(it.question) + '</h2>' +
       '<div class="opts" role="group" aria-label="Answer choices">' + opts + '</div>' +
@@ -1434,7 +1435,9 @@ window.HN = (function () {
         '<p class="verdict ' + (good ? 'good' : 'bad') + '">' + (good ? icons.check + '<b>Correct</b>'
           : icons.cross + '<b>Not quite</b><span class="fb-key">' + (L ? 'the answer is ' + esc(L) : esc(it.correctAnswer)) + '</span>') + '</p>' +
         explainHtml(it, a.choice, 'why', true) +
-        (!good && !it.repeat && S.scheduled[it.id] ? '<p class="src">It will come back ' + (S.repeats === 1 ? 'once' : S.repeats + ' times') + '.</p>' : '') +
+        (!good && S.repeats > 0 && S.scheduled[it.id] ? '<p class="src">' + (it.repeat ? 'Missed again: it will come back again.'
+          : S.layout === 'card' ? 'It will come back ' + (S.repeats === 1 ? 'once' : S.repeats + ' times') + '.'
+          : 'It is added again at the bottom of the list.') + '</p>' : '') +
         (it.source ? '<p class="src">' + esc(it.source) + '</p>' : '');
     } else {
       fb.hidden = true; fb.innerHTML = '';
@@ -1449,9 +1452,12 @@ window.HN = (function () {
     var choice = it.options[k]; if (choice == null) return;
     var ok = choice === it.correctAnswer;
     S.ans[it.uid] = { choice: choice, ok: ok };
-    if (!exam() && !(it.id in S.first)) {
-      S.first[it.id] = ok; S.firstChoice[it.id] = choice;
-      if (!ok && !it.repeat && S.layout === 'card' && S.repeats > 0 && !S.scheduled[it.id]) scheduleRepeats(it);
+    if (!exam()) {
+      if (!(it.id in S.first)) { S.first[it.id] = ok; S.firstChoice[it.id] = choice; }
+      if (!ok && S.repeats > 0) {
+        if (!it.repeat && !S.scheduled[it.id]) scheduleRepeats(it, S.repeats);
+        else if (it.repeat && !pendingRepeat(it)) scheduleRepeats(it, 1);   // missed again: it comes back again until right
+      }
     }
     paint(card, it);
     refresh();
@@ -1461,12 +1467,22 @@ window.HN = (function () {
     }
   }
 
-  function scheduleRepeats(it) {
+  function pendingRepeat(it) {
+    return S.queue.some(function (q) { return q.repeat && q.id === it.id && q !== it && !answered(q); });
+  }
+  function scheduleRepeats(it, n) {
     S.scheduled[it.id] = true;
-    for (var i = 0; i < S.repeats; i++) {
+    var added = [];
+    for (var i = 0; i < n; i++) {
       var c = makeItem(it.src, { repeat: true });
-      var at = Math.min(S.queue.length, S.idx + 3 + i * 4 + i);
-      S.queue.splice(at, 0, c);
+      if (S.layout === 'card') {
+        var at = Math.min(S.queue.length, S.idx + 3 + i * 5);
+        S.queue.splice(at, 0, c);
+      } else { S.queue.push(c); added.push(c); }
+    }
+    if (added.length) {      /* one-page layout: the retry cards go at the bottom of the list */
+      var stage = $('#stage'), dock = $('#dock');
+      added.forEach(function (c) { var el = buildCard(c, S.queue.indexOf(c), true); if (dock) stage.insertBefore(el, dock); else stage.appendChild(el); });
     }
   }
 
@@ -1506,20 +1522,20 @@ window.HN = (function () {
 
   /* repeats: can be switched off during the session */
   function setRepeats(on) {
-    if (on) { if (!exam() && S.layout === 'card') S.repeats = S.repeatsWas || 1; }
+    if (on) { if (!exam()) S.repeats = S.repeatsWas || 1; }
     else {
       if (S.repeats) S.repeatsWas = S.repeats;
       S.repeats = 0;
       var c = cur(), keep = S.queue.filter(function (q) { return !(q.repeat && !answered(q)) || (q === c && answered(q)); });
       var at = keep.indexOf(c); S.queue = keep; S.idx = at >= 0 ? at : Math.min(S.idx, keep.length);
-      if (S.idx >= S.queue.length) { finish(); return; }
-      renderWork();
+      if (S.layout === 'card' && S.idx >= S.queue.length) { finish(); return; }
+      var y = window.scrollY; renderWork(); if (S.layout !== 'card') window.scrollTo(0, y);
       H.toast('Repeats off: missed questions will not come back.');
     }
     repUI(); refresh();
   }
   function repUI() {        /* the repeats switch lives only in the side menu's Settings tab */
-    var ok = !exam() && S.layout === 'card', live = $('#repLive');
+    var ok = !exam(), live = $('#repLive');
     if (live) { live.checked = S.repeats > 0; live.closest('label').hidden = !ok; }
   }
   /* going back can be switched during the session (the menu's Settings tab) */
@@ -1767,7 +1783,7 @@ window.HN = (function () {
     var r = parseInt(H.radio('rep', '1'), 10);
     var parts = [H.radio('timing', 'learn') === 'exam' ? 'answers at the end' : 'answer after each choice',
                  H.radio('layout', 'card') === 'scroll' ? 'all on one page' : 'one at a time',
-                 (H.radio('timing', 'learn') === 'exam' || H.radio('layout', 'card') === 'scroll') ? 'no repeats in this mode' : (r ? 'wrong ones back ' + ['', 'once', 'twice', '3 times'][r] : 'no repeats')];
+                 H.radio('timing', 'learn') === 'exam' ? 'no repeats in this mode' : (r ? 'wrong ones back ' + ['', 'once', 'twice', '3 times'][r] : 'no repeats')];
     if (!$('#freeNav').checked) parts.push('forward only');
     if ($('#shuffleQ').checked) parts.push('shuffled');
     el.textContent = parts.join(' · ');
